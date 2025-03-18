@@ -6,8 +6,8 @@ namespace Application.Models;
 
 public sealed class AppOptions
 {
-    [Required] public string JwtSecret { get; set; } = null!;
-    [Required] public string DbConnectionString { get; set; } = null!;
+    [Required] public string JwtSecret { get; set; } = string.Empty!;
+    [Required] public string DbConnectionString { get; set; } = string.Empty!;
     public bool Seed { get; set; } = true;
     public int PORT { get; set; } = 8080;
     public int WS_PORT { get; set; } = 8181;
