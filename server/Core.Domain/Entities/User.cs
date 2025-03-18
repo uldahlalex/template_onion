@@ -14,4 +14,6 @@ public partial class User
     public string Salt { get; set; } = null!;
 
     public string Role { get; set; } = null!;
+
+    public virtual ICollection<Group> Groups { get; set; } = new List<Group>();
 }

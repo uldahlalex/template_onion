@@ -2,6 +2,7 @@
 
     <ItemGroup>
         <ProjectReference Include="..\Infrastructure.Postgres.Scaffolding\Infrastructure.Postgres.Scaffolding.csproj"/>
+        <ProjectReference Include="..\Application\Application.csproj"/>
     </ItemGroup>
 
     <ItemGroup>
