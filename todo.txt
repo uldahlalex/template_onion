@@ -1,0 +1,6 @@
+Test setup: 
+    - Ws connection
+    - REST requests
+    - state checks with dictionary helpers
+    - broadcast checks with WsClient
+    
