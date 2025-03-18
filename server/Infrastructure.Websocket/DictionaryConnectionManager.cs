@@ -78,10 +78,9 @@ public class WebSocketConnectionManager<TConnection, TMessageBase> : IConnection
 
     public async Task RemoveFromTopic(string topic, string memberId)
     {
-        // Remove from TopicMembers
         TopicMembers.AddOrUpdate(
             topic,
-            new HashSet<string>(), // Should never happen as topic should exist
+            new HashSet<string>(), 
             (_, existing) =>
             {
                 var newSet = new HashSet<string>(existing);
@@ -89,16 +88,15 @@ public class WebSocketConnectionManager<TConnection, TMessageBase> : IConnection
                 return newSet;
             });
 
-        // Clean up empty topic
         if (TopicMembers.TryGetValue(topic, out var members) && !members.Any())
         {
             TopicMembers.TryRemove(topic, out _);
         }
 
-        // Remove from MemberTopics
+      
         MemberTopics.AddOrUpdate(
             memberId,
-            new HashSet<string>(), // Should never happen as member should exist
+            new HashSet<string>(), 
             (_, existing) =>
             {
                 var newSet = new HashSet<string>(existing);
@@ -106,7 +104,6 @@ public class WebSocketConnectionManager<TConnection, TMessageBase> : IConnection
                 return newSet;
             });
 
-        // Clean up empty member
         if (MemberTopics.TryGetValue(memberId, out var topics) && !topics.Any())
         {
             MemberTopics.TryRemove(memberId, out _);
