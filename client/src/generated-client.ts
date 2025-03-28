@@ -334,6 +334,12 @@ export interface ExampleServerResponse extends BaseDto {
     somethingTheServerSends?: string;
 }
 
+export interface Ping extends BaseDto {
+}
+
+export interface Pong extends BaseDto {
+}
+
 export interface ServerSendsErrorMessage extends BaseDto {
     message?: string;
 }
@@ -343,6 +349,8 @@ export enum StringConstants {
     MemberLeftNotification = "MemberLeftNotification",
     ExampleClientDto = "ExampleClientDto",
     ExampleServerResponse = "ExampleServerResponse",
+    Ping = "Ping",
+    Pong = "Pong",
     ServerSendsErrorMessage = "ServerSendsErrorMessage",
 }
 

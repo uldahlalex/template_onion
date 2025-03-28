@@ -309,6 +309,28 @@
           }
         ]
       },
+      "Ping": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/BaseDto"
+          },
+          {
+            "type": "object",
+            "additionalProperties": false
+          }
+        ]
+      },
+      "Pong": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/BaseDto"
+          },
+          {
+            "type": "object",
+            "additionalProperties": false
+          }
+        ]
+      },
       "ServerSendsErrorMessage": {
         "allOf": [
           {
@@ -332,6 +354,8 @@
           "MemberLeftNotification",
           "ExampleClientDto",
           "ExampleServerResponse",
+          "Ping",
+          "Pong",
           "ServerSendsErrorMessage"
         ]
       }

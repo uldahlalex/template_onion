@@ -1,74 +1,97 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
-using Application.Interfaces.Infrastructure.Websocket;
 using Fleck;
-using Infrastructure.Websocket.ConnectionMangerScopedModels;
 using Microsoft.Extensions.Logging;
-using WebSocketBoilerplate;
+using Application.Interfaces.Infrastructure.Websocket;
 
 namespace Infrastructure.Websocket;
 
-public class WebSocketConnectionManager<TConnection, TMessageBase> : IConnectionManager
-    where TConnection : class
-    where TMessageBase : class
+public sealed class WebSocketConnectionManager : IConnectionManager
 {
-    private readonly ConcurrentDictionary<string /* Client ID */, TConnection> _connectionIdToSocket = new();
-    private readonly ILogger<WebSocketConnectionManager<TConnection, TMessageBase>> _logger;
+    private readonly ILogger<WebSocketConnectionManager> _logger;
+    private readonly ConcurrentDictionary<string, IWebSocketConnection> _connectionIdToSocket = new();
+    private readonly ConcurrentDictionary<string, HashSet<string>> _topicMembers = new();
+    private readonly ConcurrentDictionary<string, HashSet<string>> _memberTopics = new();
+    private readonly ConcurrentDictionary<string, string> _socketToConnectionId = new();
 
-    public WebSocketConnectionManager(ILogger<WebSocketConnectionManager<TConnection, TMessageBase>> logger)
+    public WebSocketConnectionManager(ILogger<WebSocketConnectionManager> logger)
     {
         _logger = logger;
     }
 
-    public ConcurrentDictionary<string, object> ConnectionIdToSocket =>
-        new(_connectionIdToSocket.ToDictionary(kvp => kvp.Key, kvp => (object)kvp.Value));
-
-    public ConcurrentDictionary<string, string> SocketToConnectionId { get; } = new();
-
-    public ConcurrentDictionary<string, HashSet<string>> TopicMembers { get; set; } = new();
-    public ConcurrentDictionary<string, HashSet<string>> MemberTopics { get; set; } = new();
-
-    public Task<ConcurrentDictionary<string, HashSet<string>>> GetAllTopicsWithMembers()
+    public async Task OnOpen(object socket, string clientId)
     {
-        return Task.FromResult(TopicMembers);
+        if (socket is not IWebSocketConnection webSocket)
+        {
+            throw new ArgumentException("Socket must be an IWebSocketConnection", nameof(socket));
+        }
+
+        _logger.LogDebug("OnOpen called with clientId: {ClientId}", clientId);
+
+        // Remove any existing connection for this client
+        if (_connectionIdToSocket.TryRemove(clientId, out var oldSocket))
+        {
+            _socketToConnectionId.TryRemove(oldSocket.ConnectionInfo.Id.ToString(), out _);
+            _logger.LogInformation("Removed old connection {SocketId} for client {ClientId}", 
+                oldSocket.ConnectionInfo.Id, clientId);
+        }
+
+        // Add new connection
+        _connectionIdToSocket[clientId] = webSocket;
+        _socketToConnectionId[webSocket.ConnectionInfo.Id.ToString()] = clientId;
+
+        // Resubscribe to previous topics if any
+        if (_memberTopics.TryGetValue(clientId, out var topics))
+        {
+            foreach (var topic in topics)
+            {
+                await AddToTopic(topic, clientId);
+            }
+        }
+
+        await LogCurrentState();
     }
 
-    public Task<ConcurrentDictionary<string, HashSet<string>>> GetAllMembersWithTopics()
+    public async Task OnClose(object socket, string clientId)
     {
-        return Task.FromResult(MemberTopics);
+        if (socket is not IWebSocketConnection webSocket)
+        {
+            throw new ArgumentException("Socket must be an IWebSocketConnection", nameof(socket));
+        }
+
+        var socketId = webSocket.ConnectionInfo.Id.ToString();
+        _logger.LogDebug("OnClose called with clientId: {ClientId} and socketId: {SocketId}", clientId, socketId);
+
+        // Remove socket mappings
+        if (_connectionIdToSocket.TryGetValue(clientId, out var currentSocket) &&
+            currentSocket.ConnectionInfo.Id.ToString() == socketId)
+        {
+            _connectionIdToSocket.TryRemove(clientId, out _);
+        }
+        _socketToConnectionId.TryRemove(socketId, out _);
+
+        // Note: We don't remove topic subscriptions on disconnect to allow for reconnection
+        await LogCurrentState();
     }
 
-    public Task<Dictionary<string, string>> GetAllConnectionIdsWithSocketId()
-    {
-        var result = new Dictionary<string, string>();
-        foreach (var kvp in _connectionIdToSocket) result[kvp.Key] = GetSocketId(kvp.Value);
-        return Task.FromResult(result);
-    }
-
-    public Task<Dictionary<string, string>> GetAllSocketIdsWithConnectionId()
-    {
-        return Task.FromResult(SocketToConnectionId.ToDictionary(k => k.Key, v => v.Value));
-    }
     public async Task AddToTopic(string topic, string memberId)
     {
-        // Add to TopicMembers
-        TopicMembers.AddOrUpdate(
+        _topicMembers.AddOrUpdate(
             topic,
             new HashSet<string> { memberId },
             (_, existing) =>
             {
-                var newSet = new HashSet<string>(existing); // Create new set
+                var newSet = new HashSet<string>(existing);
                 newSet.Add(memberId);
                 return newSet;
             });
 
-        // Add to MemberTopics
-        MemberTopics.AddOrUpdate(
+        _memberTopics.AddOrUpdate(
             memberId,
             new HashSet<string> { topic },
             (_, existing) =>
             {
-                var newSet = new HashSet<string>(existing); // Create new set
+                var newSet = new HashSet<string>(existing);
                 newSet.Add(topic);
                 return newSet;
             });
@@ -78,9 +101,9 @@ public class WebSocketConnectionManager<TConnection, TMessageBase> : IConnection
 
     public async Task RemoveFromTopic(string topic, string memberId)
     {
-        TopicMembers.AddOrUpdate(
+        _topicMembers.AddOrUpdate(
             topic,
-            new HashSet<string>(), 
+            new HashSet<string>(),
             (_, existing) =>
             {
                 var newSet = new HashSet<string>(existing);
@@ -88,15 +111,14 @@ public class WebSocketConnectionManager<TConnection, TMessageBase> : IConnection
                 return newSet;
             });
 
-        if (TopicMembers.TryGetValue(topic, out var members) && !members.Any())
+        if (_topicMembers.TryGetValue(topic, out var members) && !members.Any())
         {
-            TopicMembers.TryRemove(topic, out _);
+            _topicMembers.TryRemove(topic, out _);
         }
 
-      
-        MemberTopics.AddOrUpdate(
+        _memberTopics.AddOrUpdate(
             memberId,
-            new HashSet<string>(), 
+            new HashSet<string>(),
             (_, existing) =>
             {
                 var newSet = new HashSet<string>(existing);
@@ -104,206 +126,82 @@ public class WebSocketConnectionManager<TConnection, TMessageBase> : IConnection
                 return newSet;
             });
 
-        if (MemberTopics.TryGetValue(memberId, out var topics) && !topics.Any())
+        if (_memberTopics.TryGetValue(memberId, out var topics) && !topics.Any())
         {
-            MemberTopics.TryRemove(memberId, out _);
+            _memberTopics.TryRemove(memberId, out _);
         }
 
         await LogCurrentState();
     }
 
+    public async Task BroadcastToTopic<TMessage>(string topic, TMessage message) where TMessage : class
+    {
+        if (!_topicMembers.TryGetValue(topic, out var members))
+        {
+            _logger.LogWarning("No topic found: {Topic}", topic);
+            return;
+        }
+
+        var membersList = members.ToList();
+        foreach (var memberId in membersList)
+        {
+            if (!_connectionIdToSocket.TryGetValue(memberId, out var socket))
+            {
+                continue; // Skip offline members but don't remove their subscription
+            }
+
+            if (!socket.IsAvailable)
+            {
+                continue; // Skip unavailable sockets but don't remove their subscription
+            }
+
+            try
+            {
+                var json = JsonSerializer.Serialize(message, 
+                    new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+                await socket.Send(json);
+                _logger.LogDebug("Sent message to client {ClientId} on topic {Topic}", memberId, topic);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error sending message to client {ClientId} on topic {Topic}", memberId, topic);
+            }
+        }
+    }
+
     public Task<List<string>> GetMembersFromTopicId(string topic)
     {
         return Task.FromResult(
-            TopicMembers.TryGetValue(topic, out var members)
-                ? new List<string>(members)
+            _topicMembers.TryGetValue(topic, out var members)
+                ? members.ToList()
                 : new List<string>());
     }
 
     public Task<List<string>> GetTopicsFromMemberId(string memberId)
     {
         return Task.FromResult(
-            MemberTopics.TryGetValue(memberId, out var topics)
-                ? new List<string>(topics)
+            _memberTopics.TryGetValue(memberId, out var topics)
+                ? topics.ToList()
                 : new List<string>());
     }
 
-    public Task<string> GetClientIdFromSocketId(string socketId)
-    {
-        if (SocketToConnectionId.TryGetValue(socketId, out var connectionId)) return Task.FromResult(connectionId);
-
-        throw new KeyNotFoundException($"Could not find client ID for socket ID {socketId}");
-    }
-
-    public async Task OnOpen<T>(T socket, string clientId)
-    {
-        if (socket is not TConnection typedSocket)
-            throw new ArgumentException($"Expected socket of type {typeof(TConnection).Name} but got {typeof(T).Name}");
-
-        _logger.LogDebug($"OnOpen called with clientId: {clientId}");
-
-        if (_connectionIdToSocket.TryRemove(clientId, out var oldSocket))
-        {
-            var oldSocketId = GetSocketId(oldSocket);
-            SocketToConnectionId.TryRemove(oldSocketId, out _);
-            _logger.LogInformation($"Removed old connection {oldSocketId} for client {clientId}");
-        }
-
-        _connectionIdToSocket[clientId] = typedSocket;
-        SocketToConnectionId[GetSocketId(typedSocket)] = clientId;
-
-        _logger.LogInformation($"Added new connection {GetSocketId(typedSocket)} for client {clientId}");
-        await LogCurrentState();
-    }
-
-    public async Task OnClose<T>(T socket, string clientId)
-    {
-        if (socket is not TConnection typedSocket)
-            throw new ArgumentException($"Expected socket of type {typeof(TConnection).Name} but got {typeof(T).Name}");
-
-        var socketId = GetSocketId(typedSocket);
-        _logger.LogDebug($"OnClose called with clientId: {clientId} and socketId: {socketId}");
-
-        if (_connectionIdToSocket.TryGetValue(clientId, out var currentSocket) &&
-            GetSocketId(currentSocket) == socketId)
-        {
-            _connectionIdToSocket.TryRemove(clientId, out _);
-            _logger.LogInformation($"Removed connection for client {clientId}");
-        }
-
-        SocketToConnectionId.TryRemove(socketId, out _);
-
-        if (MemberTopics.TryGetValue(clientId, out var topics))
-            foreach (var topic in new List<string>(topics))
-            {
-                await RemoveFromTopic(topic, clientId);
-                if (TopicMembers.TryGetValue(topic, out var members) && members.Count > 0)
-                    await NotifyMemberLeft(topic, clientId);
-            }
-
-        MemberTopics.TryRemove(clientId, out _);
-        await LogCurrentState();
-    }
-
-    public async Task BroadcastToTopic<TMessage>(string topic, TMessage message) where TMessage : class
-    {
-        await LogCurrentState();
-
-        if (!TopicMembers.TryGetValue(topic, out var members))
-        {
-            _logger.LogWarning($"No topic found: {topic}");
-            return;
-        }
-
-        var membersList = new List<string>(members);
-        foreach (var memberId in membersList) await BroadcastToMember(topic, memberId, message);
-    }
-
-
-    public async Task LogCurrentState()
+    private async Task LogCurrentState()
     {
         try
         {
-            _logger.LogInformation(JsonSerializer.Serialize(new
+            var state = new
             {
-                ConnectionIdToSocket = await GetAllConnectionIdsWithSocketId(),
-                SocketToConnectionId = await GetAllSocketIdsWithConnectionId(),
-                TopicsWithMembers = TopicMembers,
-                MembersWithTopics = MemberTopics
-            }, new JsonSerializerOptions
-            {
-                WriteIndented = true
-            }));
+                Connections = _connectionIdToSocket.Keys,
+                Topics = _topicMembers,
+                MemberSubscriptions = _memberTopics
+            };
+
+            _logger.LogDebug("Current state: {State}", 
+                JsonSerializer.Serialize(state, new JsonSerializerOptions { WriteIndented = true }));
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error logging current state");
-        }
-    }
-
-    protected virtual async Task NotifyMemberLeft(string topic, string memberId)
-    {
-        var dto = new MemberLeftNotification
-        {
-            ClientId = memberId,
-            Topic = topic
-        };
-
-        await BroadcastToTopic(topic, dto);
-    }
-
-    private async Task BroadcastToMember<TMessage>(string topic, string memberId, TMessage message)
-        where TMessage : class
-    {
-        if (!_connectionIdToSocket.TryGetValue(memberId, out var socket))
-        {
-            _logger.LogWarning($"No socket found for member: {memberId}");
-            await RemoveFromTopic(topic, memberId);
-            return;
-        }
-
-        if (!IsSocketAvailable(socket))
-        {
-            _logger.LogWarning($"Socket not available for {memberId}");
-            await RemoveFromTopic(topic, memberId);
-            return;
-        }
-
-        try
-        {
-            SendToSocket(socket, message);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, $"Error sending message to {memberId}");
-            await RemoveFromTopic(topic, memberId);
-        }
-    }
-
-    protected virtual string GetSocketId(TConnection socket)
-    {
-        if (socket is IWebSocketConnection webSocket) return webSocket.ConnectionInfo.Id.ToString();
-
-        return socket.GetHashCode().ToString();
-    }
-
-    protected virtual bool IsSocketAvailable(TConnection socket)
-    {
-        if (socket is IWebSocketConnection webSocket) return webSocket.IsAvailable;
-
-        return true;
-    }
-
-    protected virtual void SendToSocket<TMessage>(TConnection socket, TMessage message)
-        where TMessage : class
-    {
-        try
-        {
-            if (socket is IWebSocketConnection webSocket)
-            {
-                if (message is TMessageBase baseMessage && typeof(TMessageBase) == typeof(BaseDto))
-                {
-                    dynamic dynamicMessage = baseMessage;
-                    webSocket.SendDto((BaseDto)dynamicMessage);
-                    _logger.LogDebug($"Sent BaseDto message to socket {GetSocketId(socket)}");
-                    return;
-                }
-
-                var json = JsonSerializer.Serialize(message,
-                    new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
-                webSocket.Send(json);
-                _logger.LogDebug($"Sent JSON message to socket {GetSocketId(socket)}");
-                return;
-            }
-
-            throw new NotImplementedException(
-                $"Sending messages to {typeof(TConnection).Name} with message type {typeof(TMessage).Name} " +
-                $"is not implemented. Override SendToSocket in a derived class.");
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, $"Error sending message to socket {GetSocketId(socket)}");
-            throw;
         }
     }
 }
